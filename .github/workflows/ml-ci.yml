@@ -1,3 +1,4 @@
+
 name: Student Result ML CI
 
 on:
@@ -16,11 +17,9 @@ permissions:
 
 jobs:
   train-and-test:
-
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -48,6 +47,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: student-result-ml-artifacts
-          path: student_result_model_missing.pkl
+          path: |
+            student_result_model.pkl
+            metrics.json
+            student_results.csv
           if-no-files-found: error
           retention-days: 7
