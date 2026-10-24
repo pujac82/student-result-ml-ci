@@ -1,110 +1,112 @@
-import pandas as pd
-import joblib
+
 import json
 
+import joblib
+import numpy as np
+import pandas as pd
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 
-# Student dataset
-data = {
-    "attendance": [
-        90, 85, 60, 75, 95,
-        55, 80, 70, 88, 65,
-        92, 58, 78, 82, 68,
-        96, 72, 62, 87, 76
-    ],
+def create_dataset():
+    # Generate the same dataset on every run
+    rng = np.random.default_rng(42)
+    number_of_students = 300
 
-    "internal_marks": [
-        85, 80, 55, 70, 90,
-        50, 75, 65, 82, 60,
-        88, 52, 72, 78, 62,
-        94, 68, 58, 84, 73
-    ],
+    data = pd.DataFrame({
+        "attendance": rng.integers(50, 101, number_of_students),
+        "internal_marks": rng.integers(20, 101, number_of_students),
+        "assignment_marks": rng.integers(30, 101, number_of_students),
+        "previous_score": rng.integers(30, 101, number_of_students)
+    })
 
-    "assignment_marks": [
-        90, 85, 60, 72, 95,
-        55, 78, 68, 88, 62,
-        92, 58, 75, 80, 65,
-        96, 70, 60, 86, 74
-    ],
-
-    "result": [
-        1, 1, 0, 1, 1,
-        0, 1, 0, 1, 0,
-        1, 0, 1, 1, 0,
-        1, 1, 0, 1, 1
-    ]
-}
-
-# Create DataFrame
-df = pd.DataFrame(data)
-
-# Save dataset
-df.to_csv("student_results.csv", index=False)
-
-# Input features
-X = df[
-    [
-        "attendance",
-        "internal_marks",
-        "assignment_marks"
-    ]
-]
-
-# Target
-y = df["result"]
-
-# Split data
-X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
-    test_size=0.2,
-    random_state=42
-)
-
-# Create model
-model = RandomForestClassifier(
-    n_estimators=100,
-    random_state=42
-)
-
-# Train model
-model.fit(X_train, y_train)
-
-# Make predictions
-predictions = model.predict(X_test)
-
-# Calculate accuracy
-accuracy = accuracy_score(
-    y_test,
-    predictions
-)
-
-# Save trained model
-joblib.dump(
-    model,
-    "student_result_model.pkl"
-)
-
-# Save metrics
-metrics = {
-    "accuracy": accuracy,
-    "training_records": len(X_train),
-    "testing_records": len(X_test)
-}
-
-with open("metrics.json", "w") as file:
-    json.dump(
-        metrics,
-        file,
-        indent=4
+    data["weighted_score"] = (
+        0.25 * data["attendance"]
+        + 0.35 * data["internal_marks"]
+        + 0.20 * data["assignment_marks"]
+        + 0.20 * data["previous_score"]
     )
 
-print("Model training completed successfully.")
-print("Accuracy:", accuracy)
-print("Generated files:")
-print("student_result_model.pkl")
-print("metrics.json")
-print("student_results.csv")
+    # 1 = PASS, 0 = FAIL
+    data["result"] = (data["weighted_score"] >= 60).astype(int)
+
+    return data
+
+
+def train_model():
+    print("Creating dataset...")
+
+    data = create_dataset()
+    data.to_csv("student_results.csv", index=False)
+
+    print("Dataset created successfully.")
+    print("Number of records:", len(data))
+
+    features = [
+        "attendance",
+        "internal_marks",
+        "assignment_marks",
+        "previous_score"
+    ]
+
+    X = data[features]
+    y = data["result"]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=0.20,
+        random_state=42,
+        stratify=y
+    )
+
+    print("Training records:", len(X_train))
+    print("Testing records :", len(X_test))
+
+    model = Pipeline([
+        ("scaler", StandardScaler()),
+        ("classifier", LogisticRegression(
+            max_iter=1000,
+            random_state=42
+        ))
+    ])
+
+    print("Training model...")
+    model.fit(X_train, y_train)
+
+    predictions = model.predict(X_test)
+    accuracy = accuracy_score(y_test, predictions)
+    matrix = confusion_matrix(y_test, predictions)
+
+    print("\nModel Evaluation")
+    print("----------------")
+    print("Accuracy:", round(accuracy, 4))
+    print("\nConfusion Matrix:")
+    print(matrix)
+
+    # Save trained model
+    joblib.dump(model, "student_result_model.pkl")
+    print("\nModel saved as student_result_model.pkl")
+
+    # Save evaluation metrics
+    metrics = {
+        "accuracy": float(accuracy),
+        "training_records": len(X_train),
+        "testing_records": len(X_test)
+    }
+
+    with open("metrics.json", "w") as file:
+        json.dump(metrics, file, indent=4)
+
+    print("Metrics saved as metrics.json")
+    print("Dataset saved as student_results.csv")
+
+    return accuracy
+
+
+if __name__ == "__main__":
+    train_model()
