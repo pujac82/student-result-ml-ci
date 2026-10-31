@@ -1,8 +1,72 @@
+
+name: Student Result ML CI-CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  train-test-deliver:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Train student result model
+        run: python train_model.py
+
+      - name: Check ML quality gate
+        run: python quality_gate.py
+
+      - name: Run ML pipeline tests
+        run: python -m unittest test_ml_pipeline.py -v
+
+      - name: Run prediction application tests
+        run: python -m unittest test_app.py -v
+
       - name: Verify Docker files
         run: |
+          ls -la
           test -f Dockerfile
           test -f .dockerignore
           test -f app.py
           test -f student_result_model.pkl
           test -f metrics.json
           test -f requirements.txt
+
+      - name: Prepare release candidate
+        run: |
+          mkdir -p release_candidate
+          cp app.py release_candidate/
+          cp student_result_model.pkl release_candidate/
+          cp metrics.json release_candidate/
+          cp requirements.txt release_candidate/
+          cp Dockerfile release_candidate/
+          cp .dockerignore release_candidate/
+          printf "Student Result Prediction ML Application\nRun: python app.py\nEndpoint: POST /predict\n" > release_candidate/DEPLOYMENT.txt
+          ls -la release_candidate/
+
+      - name: Upload release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: student-result-ml-release
+          path: release_candidate/
+          if-no-files-found: error
+          retention-days: 7
