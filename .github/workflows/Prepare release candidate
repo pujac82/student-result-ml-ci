@@ -43,6 +43,7 @@ jobs:
 
       - name: Verify Docker files
         run: |
+          echo "Checking required files..."
           ls -la
           test -f Dockerfile
           test -f .dockerignore
@@ -61,6 +62,7 @@ jobs:
           cp Dockerfile release_candidate/
           cp .dockerignore release_candidate/
           printf "Student Result Prediction ML Application\nRun: python app.py\nEndpoint: POST /predict\n" > release_candidate/DEPLOYMENT.txt
+          echo "Release candidate contents:"
           ls -la release_candidate/
 
       - name: Upload release candidate
