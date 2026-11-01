@@ -36,6 +36,48 @@ jobs:
       - name: Run Automated Tests
         run: pytest -v
 
+      - name: Build Docker Image
+        run: |
+          docker build -t student-result-prediction:latest .
+
+      - name: Start Docker Container
+        run: |
+          docker run -d --name student-app \
+            -p 5000:5000 \
+            student-result-prediction:latest
+
+      - name: Wait for Application
+        run: |
+          for i in {1..15}; do
+            if curl -fsS http://localhost:5000/health; then
+              echo "Application is healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Application health check failed"
+          exit 1
+
+      - name: Test Prediction API
+        run: |
+          curl --fail -X POST \
+            http://localhost:5000/predict \
+            -H "Content-Type: application/json" \
+            -d '{
+              "attendance": 85,
+              "internal_marks": 75,
+              "assignment_marks": 80,
+              "previous_score": 78
+            }'
+
+      - name: Display Container Logs
+        if: always()
+        run: docker logs student-app || true
+
+      - name: Remove Container
+        if: always()
+        run: docker rm -f student-app || true
+
       - name: Prepare Release Candidate
         run: |
           mkdir -p release_candidate
@@ -45,9 +87,9 @@ jobs:
           cp requirements.txt release_candidate/
           cp Dockerfile release_candidate/
           cp .dockerignore release_candidate/
-          printf "Student Result Prediction ML Application\nRun: python app.py\nEndpoint: POST /predict\n" > release_candidate/DEPLOYMENT.txt
 
       - name: Upload Release Artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: student-result-ml-release
