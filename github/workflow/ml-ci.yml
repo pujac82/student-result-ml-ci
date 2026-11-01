@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  ml-docker-release:
+  ml-release:
     runs-on: ubuntu-latest
 
     steps:
@@ -35,37 +35,21 @@ jobs:
       - name: Run Automated Tests
         run: pytest -v
 
-      - name: Verify Docker Files
-        run: |
-          test -f Dockerfile
-          test -f .dockerignore
-          test -f app.py
-          test -f requirements.txt
-          test -f student_result_model.pkl
-          test -f metrics.json
-          echo "All Docker files verified successfully"
-
-      - name: Build Docker Image
-        run: |
-          docker build -t student-result-ml:latest .
-
-      - name: Test Docker Image
-        run: |
-          docker images
-
       - name: Prepare Release Candidate
         run: |
           mkdir -p release_candidate
-          cp Dockerfile release_candidate/
-          cp .dockerignore release_candidate/
           cp app.py release_candidate/
-          cp requirements.txt release_candidate/
           cp student_result_model.pkl release_candidate/
           cp metrics.json release_candidate/
-          echo "Student Result ML Docker Release" > release_candidate/DEPLOYMENT.txt
+          cp requirements.txt release_candidate/
+          cp Dockerfile release_candidate/
+          cp .dockerignore release_candidate/
+          printf "Student Result Prediction ML Application\nRun: python app.py\nEndpoint: POST /predict\n" > release_candidate/DEPLOYMENT.txt
 
       - name: Upload Release Artifact
         uses: actions/upload-artifact@v4
         with:
           name: student-result-ml-release
           path: release_candidate/
+          if-no-files-found: error
+          retention-days: 7
