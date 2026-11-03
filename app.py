@@ -1,4 +1,5 @@
 
+from pathlib import Path
 import logging
 import sys
 import time
@@ -7,11 +8,11 @@ import uuid
 import joblib
 import pandas as pd
 
-from flask import Flask, request, jsonify, g
+from flask import Flask, jsonify, request, g
 
-# --------------------------------
+# ----------------------------------
 # 1. Configure Application Logging
-# --------------------------------
+# ----------------------------------
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,41 +23,73 @@ logging.basicConfig(
 
 logger = logging.getLogger("student-result-api")
 
-# --------------------------------
+# ----------------------------------
 # 2. Create Flask Application
-# --------------------------------
+# ----------------------------------
 
 app = Flask(__name__)
 
-# --------------------------------
-# 3. Load ML Model
-# --------------------------------
+MODEL_PATH = Path("student_result_model.pkl")
 
-MODEL_FILE = "student_result_model.pkl"
+FEATURES = [
+    "attendance",
+    "internal_marks",
+    "assignment_marks",
+    "previous_score"
+]
 
-try:
-    model = joblib.load(MODEL_FILE)
-    logger.info("event=model_loaded model_file=%s", MODEL_FILE)
+# ----------------------------------
+# 3. Load Model Function
+# ----------------------------------
 
-except Exception:
-    logger.exception("event=model_load_failed model_file=%s", MODEL_FILE)
-    raise
+def load_model():
+    try:
+        if not MODEL_PATH.exists():
+            raise FileNotFoundError(
+                "Model file not found. Run train_model.py first."
+            )
 
-# --------------------------------
+        model = joblib.load(MODEL_PATH)
+
+        logger.info(
+            "event=model_loaded model_file=%s",
+            MODEL_PATH.name
+        )
+
+        return model
+
+    except Exception:
+        logger.exception(
+            "event=model_load_failed model_file=%s",
+            MODEL_PATH.name
+        )
+        raise
+
+
+# ----------------------------------
 # 4. Request Logging Middleware
-# --------------------------------
+# ----------------------------------
 
 @app.before_request
 def before_request():
-    g.request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    g.request_id = (
+        request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    )
     g.start_time = time.perf_counter()
 
 
 @app.after_request
 def after_request(response):
-    duration_ms = (time.perf_counter() - g.start_time) * 1000
 
-    level = logging.WARNING if response.status_code >= 400 else logging.INFO
+    duration_ms = (
+        time.perf_counter() - g.start_time
+    ) * 1000
+
+    level = (
+        logging.WARNING
+        if response.status_code >= 400
+        else logging.INFO
+    )
 
     logger.log(
         level,
@@ -69,93 +102,112 @@ def after_request(response):
     )
 
     response.headers["X-Request-ID"] = g.request_id
+
     return response
 
 
-# --------------------------------
+# ----------------------------------
 # 5. Health Endpoint
-# --------------------------------
+# ----------------------------------
 
-@app.route("/health", methods=["GET"])
-def health():
+@app.get("/")
+@app.get("/health")
+def health_check():
+
     logger.info("event=health_check")
+
     return jsonify({
-        "service": "student-result-prediction",
-        "status": "ok"
+        "status": "ok",
+        "service": "student-result-prediction"
     })
 
 
-# --------------------------------
+# ----------------------------------
 # 6. Prediction Endpoint
-# --------------------------------
+# ----------------------------------
 
-@app.route("/predict", methods=["POST"])
+@app.post("/predict")
 def predict():
 
     try:
         data = request.get_json(silent=True)
 
-        required_fields = [
-            "attendance",
-            "internal_marks",
-            "assignment_marks",
-            "previous_score"
-        ]
+        if not data or not isinstance(data, dict):
 
-        if not isinstance(data, dict):
-            logger.warning("event=invalid_request reason=invalid_json")
-            return jsonify({"error": "Invalid JSON request"}), 400
-
-        missing_fields = [
-            field for field in required_fields if field not in data
-        ]
-
-        if missing_fields:
             logger.warning(
-                "event=validation_error missing_fields=%s",
-                missing_fields
+                "event=validation_error reason=invalid_json request_id=%s",
+                g.request_id
             )
+
+            return jsonify({
+                "error": "JSON request body is required"
+            }), 400
+
+        missing = [
+            feature for feature in FEATURES
+            if feature not in data
+        ]
+
+        if missing:
+
+            logger.warning(
+                "event=validation_error missing_fields=%s request_id=%s",
+                missing,
+                g.request_id
+            )
+
             return jsonify({
                 "error": "Missing required fields",
-                "fields": missing_fields
-            }), 422
+                "missing_fields": missing
+            }), 400
 
-        # Convert inputs to numeric values
         try:
-            payload = {
-                field: float(data[field])
-                for field in required_fields
-            }
+            sample = pd.DataFrame([{
+                feature: float(data[feature])
+                for feature in FEATURES
+            }])
+
         except (ValueError, TypeError):
-            logger.warning("event=validation_error reason=non_numeric_input")
+
+            logger.warning(
+                "event=validation_error reason=non_numeric_input request_id=%s",
+                g.request_id
+            )
+
             return jsonify({
                 "error": "All input features must be numeric"
-            }), 422
+            }), 400
 
-        # Safe logging: feature names only
+        # Log feature names only; never log full student details
         logger.info(
-            "event=prediction_request feature_names=%s",
-            sorted(payload.keys())
+            "event=prediction_request feature_names=%s request_id=%s",
+            FEATURES,
+            g.request_id
         )
 
-        input_df = pd.DataFrame([payload])
+        # Preserve original model loading and prediction logic
+        model = load_model()
 
-        prediction = model.predict(input_df)[0]
+        code = int(model.predict(sample)[0])
+
+        result = "PASS" if code == 1 else "FAIL"
 
         logger.info(
-            "event=prediction_success prediction=%s",
-            str(prediction)
+            "event=prediction_success prediction=%s request_id=%s",
+            result,
+            g.request_id
         )
 
         return jsonify({
-            "prediction": str(prediction),
-            "prediction_code": int(prediction)
+            "prediction": result,
+            "prediction_code": code
         })
 
     except Exception:
+
         logger.exception(
             "event=prediction_failed request_id=%s",
-            getattr(g, "request_id", "unknown")
+            g.request_id
         )
 
         return jsonify({
@@ -163,22 +215,33 @@ def predict():
         }), 500
 
 
-# --------------------------------
-# 7. Handle Unknown Routes
-# --------------------------------
+# ----------------------------------
+# 7. Missing Route Error Tracking
+# ----------------------------------
 
 @app.errorhandler(404)
 def not_found(error):
-    logger.warning("event=route_not_found path=%s", request.path)
+
+    logger.warning(
+        "event=route_not_found path=%s request_id=%s",
+        request.path,
+        getattr(g, "request_id", "unknown")
+    )
 
     return jsonify({
         "error": "Route not found"
     }), 404
 
 
-# --------------------------------
+# ----------------------------------
 # 8. Run Application
-# --------------------------------
+# ----------------------------------
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+
+    logger.info("event=application_starting")
+
+    app.run(
+        host="0.0.0.0",
+        port=5000
+    )
