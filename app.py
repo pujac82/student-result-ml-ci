@@ -7,25 +7,14 @@ import uuid
 
 import joblib
 import pandas as pd
-
-from flask import Flask, jsonify, request, g
-
-# ----------------------------------
-# 1. Configure Application Logging
-# ----------------------------------
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-    force=True
+from flask import Flask, jsonify, request, g, Response
+from prometheus_client import (
+    Counter,
+    Histogram,
+    Gauge,
+    generate_latest,
+    CONTENT_TYPE_LATEST
 )
-
-logger = logging.getLogger("student-result-api")
-
-# ----------------------------------
-# 2. Create Flask Application
-# ----------------------------------
 
 app = Flask(__name__)
 
@@ -38,110 +27,127 @@ FEATURES = [
     "previous_score"
 ]
 
-# ----------------------------------
-# 3. Load Model Function
-# ----------------------------------
+# Logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+logger = logging.getLogger(__name__)
+
+# Prometheus metrics
+REQUEST_COUNT = Counter(
+    "student_api_requests_total",
+    "Total API requests",
+    ["method", "endpoint", "status"]
+)
+
+REQUEST_DURATION = Histogram(
+    "student_api_request_duration_seconds",
+    "API request duration"
+)
+
+PREDICTION_COUNT = Counter(
+    "student_predictions_total",
+    "Total student predictions",
+    ["result"]
+)
+
+MODEL_STATUS = Gauge(
+    "student_model_status",
+    "Model status: 1 = loaded, 0 = not loaded"
+)
+
+ERROR_COUNT = Counter(
+    "student_api_errors_total",
+    "Total API errors",
+    ["error_type"]
+)
+
 
 def load_model():
     try:
-        if not MODEL_PATH.exists():
-            raise FileNotFoundError(
-                "Model file not found. Run train_model.py first."
-            )
-
         model = joblib.load(MODEL_PATH)
-
-        logger.info(
-            "event=model_loaded model_file=%s",
-            MODEL_PATH.name
-        )
-
+        MODEL_STATUS.set(1)
+        logger.info("Model loaded successfully")
         return model
-
     except Exception:
-        logger.exception(
-            "event=model_load_failed model_file=%s",
-            MODEL_PATH.name
-        )
-        raise
+        MODEL_STATUS.set(0)
+        logger.exception("Model loading failed")
+        return None
 
 
-# ----------------------------------
-# 4. Request Logging Middleware
-# ----------------------------------
+model = load_model()
+
 
 @app.before_request
 def before_request():
-    g.request_id = (
-        request.headers.get("X-Request-ID") or str(uuid.uuid4())
-    )
-    g.start_time = time.perf_counter()
+    g.request_id = str(uuid.uuid4())
+    g.start_time = time.time()
 
 
 @app.after_request
 def after_request(response):
+    duration = time.time() - g.start_time
 
-    duration_ms = (
-        time.perf_counter() - g.start_time
-    ) * 1000
+    if request.endpoint != "metrics":
+        REQUEST_COUNT.labels(
+            request.method,
+            request.endpoint or "unknown",
+            str(response.status_code)
+        ).inc()
 
-    level = (
-        logging.WARNING
-        if response.status_code >= 400
-        else logging.INFO
-    )
+        REQUEST_DURATION.observe(duration)
 
-    logger.log(
-        level,
-        "event=http_request request_id=%s method=%s path=%s status=%s duration_ms=%.2f",
+    response.headers["X-Request-ID"] = g.request_id
+
+    logger.info(
+        "request_id=%s method=%s path=%s status=%s duration=%.4f",
         g.request_id,
         request.method,
         request.path,
         response.status_code,
-        duration_ms
+        duration
     )
-
-    response.headers["X-Request-ID"] = g.request_id
 
     return response
 
 
-# ----------------------------------
-# 5. Health Endpoint
-# ----------------------------------
+@app.route("/")
+def home():
+    return jsonify({
+        "message": "Student Result Prediction API"
+    })
 
-@app.get("/")
-@app.get("/health")
-def health_check():
 
-    logger.info("event=health_check")
-
+@app.route("/health")
+def health():
     return jsonify({
         "status": "ok",
         "service": "student-result-prediction"
     })
 
 
-# ----------------------------------
-# 6. Prediction Endpoint
-# ----------------------------------
+@app.route("/metrics")
+def metrics():
+    return Response(
+        generate_latest(),
+        mimetype=CONTENT_TYPE_LATEST
+    )
 
-@app.post("/predict")
+
+@app.route("/predict", methods=["POST"])
 def predict():
 
+    global model
+
+    if model is None:
+        ERROR_COUNT.labels("model_unavailable").inc()
+        return jsonify({"error": "Model not available"}), 503
+
     try:
-        data = request.get_json(silent=True)
-
-        if not data or not isinstance(data, dict):
-
-            logger.warning(
-                "event=validation_error reason=invalid_json request_id=%s",
-                g.request_id
-            )
-
-            return jsonify({
-                "error": "JSON request body is required"
-            }), 400
+        data = request.get_json(silent=True) or {}
 
         missing = [
             feature for feature in FEATURES
@@ -149,99 +155,60 @@ def predict():
         ]
 
         if missing:
-
-            logger.warning(
-                "event=validation_error missing_fields=%s request_id=%s",
-                missing,
-                g.request_id
-            )
-
+            ERROR_COUNT.labels("missing_fields").inc()
             return jsonify({
-                "error": "Missing required fields",
-                "missing_fields": missing
+                "error": "Missing fields",
+                "fields": missing
             }), 400
 
-        try:
-            sample = pd.DataFrame([{
-                feature: float(data[feature])
-                for feature in FEATURES
-            }])
+        values = []
 
-        except (ValueError, TypeError):
+        for feature in FEATURES:
+            values.append(float(data[feature]))
 
-            logger.warning(
-                "event=validation_error reason=non_numeric_input request_id=%s",
-                g.request_id
-            )
-
-            return jsonify({
-                "error": "All input features must be numeric"
-            }), 400
-
-        # Log feature names only; never log full student details
-        logger.info(
-            "event=prediction_request feature_names=%s request_id=%s",
-            FEATURES,
-            g.request_id
+        input_data = pd.DataFrame(
+            [values],
+            columns=FEATURES
         )
 
-        # Preserve original model loading and prediction logic
-        model = load_model()
+        prediction = model.predict(input_data)[0]
 
-        code = int(model.predict(sample)[0])
+        result = "PASS" if int(prediction) == 1 else "FAIL"
 
-        result = "PASS" if code == 1 else "FAIL"
+        PREDICTION_COUNT.labels(result).inc()
 
         logger.info(
-            "event=prediction_success prediction=%s request_id=%s",
-            result,
-            g.request_id
+            "request_id=%s prediction=%s",
+            g.request_id,
+            result
         )
 
         return jsonify({
             "prediction": result,
-            "prediction_code": code
+            "prediction_code": int(prediction)
         })
 
+    except (ValueError, TypeError):
+        ERROR_COUNT.labels("invalid_input").inc()
+        return jsonify({
+            "error": "Invalid input values"
+        }), 400
+
     except Exception:
-
-        logger.exception(
-            "event=prediction_failed request_id=%s",
-            g.request_id
-        )
-
+        ERROR_COUNT.labels("prediction_error").inc()
+        logger.exception("Prediction failed")
         return jsonify({
             "error": "Prediction failed"
         }), 500
 
 
-# ----------------------------------
-# 7. Missing Route Error Tracking
-# ----------------------------------
-
 @app.errorhandler(404)
 def not_found(error):
-
-    logger.warning(
-        "event=route_not_found path=%s request_id=%s",
-        request.path,
-        getattr(g, "request_id", "unknown")
-    )
-
+    ERROR_COUNT.labels("not_found").inc()
     return jsonify({
-        "error": "Route not found"
+        "error": "Endpoint not found"
     }), 404
 
 
-# ----------------------------------
-# 8. Run Application
-# ----------------------------------
-
 if __name__ == "__main__":
-
-    logger.info("event=application_starting")
-
-    app.run(
-        host="0.0.0.0",
-        port=5000
-    )
+    app.run(host="0.0.0.0", port=5000)
