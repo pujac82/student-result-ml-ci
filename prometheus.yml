@@ -1,0 +1,12 @@
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "student-result-api"
+    metrics_path: "/metrics"
+    scheme: "https"
+    static_configs:
+      - targets:
+          - "YOUR-RENDER-SERVICE.onrender.com"
